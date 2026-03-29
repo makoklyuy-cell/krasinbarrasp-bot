@@ -154,15 +154,15 @@ if __name__ == '__main__':
     scheduler.add_job(auto_generate_schedule, "interval", hours=AUTO_UPDATE_INTERVAL)
     scheduler.start()
     
-    print("🌐 Запуск веб-сервера (anti-sleep)...")
-    keep_alive()
-    
     print("🤖 Запуск бота...")
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT, handle_message))
     app.add_handler(CallbackQueryHandler(button_callback))
+    
+    print("🌐 Запуск веб-сервера (anti-sleep)...")
+    keep_alive()
     
     print("🚀 Бот запущен и готов к работе!")
     app.run_polling()
