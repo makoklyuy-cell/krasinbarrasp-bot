@@ -1,4 +1,4 @@
-python-telegram-bot==20.6
+python-telegram-bot==13.7
 Pillow>=10.0.0
 apscheduler==3.10.4
 flask==3.0.0
