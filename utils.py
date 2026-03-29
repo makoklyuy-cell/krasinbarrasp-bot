@@ -68,7 +68,7 @@ def create_calendar_image(username=None):
     shifts_data = get_all_shifts()
     schedule = {}
     
-for shift in shifts_data:
+    for shift in shifts_data:
         date = shift['date']
         if date not in schedule:
             schedule[date] = []
