@@ -1,18 +1,20 @@
-from telegram import Update, ReplyKeyboardMarkup
-from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackQueryHandler
+import os
 from datetime import datetime
-import logging
+from telegram import Update
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
 
 from config import BOT_TOKEN, AUTHORIZED_USERS, SCHEDULE_GENERATION_DAY, AUTO_UPDATE_INTERVAL
 from database import init_db, add_user, get_shifts_by_date, get_shifts_by_bartender, get_last_generation_date, set_last_generation_date, approve_swap_request, reject_swap_request
+from keyboards import get_main_keyboard
 from utils import generate_schedule, create_calendar_image
+
 from apscheduler.schedulers.background import BackgroundScheduler
 from flask import Flask
 from threading import Thread
+import logging
 
 # Логирование
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
-logger = logging.getLogger(__name__)
 
 # --- 🌐 KEEP ALIVE ---
 app_web = Flask('')
@@ -40,6 +42,132 @@ def auto_generate_schedule():
         if last_gen != today.strftime("%Y-%m"):
             generate_schedule()
             set_last_generation_date(today.strftime("%Y-%m"))
-            print("✅ Расписание обновлено автоматически")
+            logging.info("✅ Расписание обновлено автоматически")
 
-# ---
+# --- 🤖 HANDLERS ---
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    username = update.message.from_user.username
+    telegram_id = update.message.from_user.id
+    
+    if username not in AUTHORIZED_USERS:
+        return await update.message.reply_text("❌ У вас нет доступа к этому боту.")
+    
+    add_user(telegram_id, username, AUTHORIZED_USERS[username])
+    
+    if not get_last_generation_date():
+        generate_schedule()
+        set_last_generation_date(datetime.now().strftime("%Y-%m"))
+    
+    await update.message.reply_text(
+        f"🍸 Привет, {AUTHORIZED_USERS[username]}!\n\nДобро пожаловать в **KrasinBar Rasp**",
+        reply_markup=get_main_keyboard()
+    )
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    username = update.message.from_user.username
+    text = update.message.text
+    
+    if username not in AUTHORIZED_USERS:
+        return
+    
+    worker_name = AUTHORIZED_USERS[username]
+    
+    if text == "📅 Сегодня":
+        today = datetime.now().strftime("%d.%m")
+        shifts = get_shifts_by_date(today)
+        if shifts:
+            msg = f"📅 **Сегодня ({today}):**\n\n"
+            for shift in shifts:
+                msg += f"⏰ {shift['time']} — {shift['bartender']}\n"
+            await update.message.reply_text(msg)
+        else:
+            await update.message.reply_text("❌ На сегодня смен нет.")
+    
+    elif text == "👤 Мои смены":
+        shifts = get_shifts_by_bartender(worker_name)
+        if shifts:
+            msg = f"👤 **Твои смены, {worker_name}:**\n\n"
+            for shift in shifts:
+                msg += f"📅 {shift['date']} ⏰ {shift['time']}\n"
+            await update.message.reply_text(msg)
+        else:
+            await update.message.reply_text("❌ У тебя нет запланированных смен.")
+    
+    elif text == "🗓 Месяц":
+        shifts = get_shifts_by_bartender(worker_name)
+        if shifts:
+            msg = f"🗓 **Все смены на месяц:**\n\n"
+            for shift in shifts:
+                msg += f"{shift['date']} — {shift['time']} ({shift['bartender']})\n"
+            await update.message.reply_text(msg)
+        else:
+            await update.message.reply_text("❌ Смен нет.")
+    
+    elif text == "📷 Календарь":
+        try:
+            file_path = create_calendar_image(username)
+            await update.message.reply_photo(photo=open(file_path, "rb"))
+        except Exception as e:
+            await update.message.reply_text(f"❌ Ошибка генерации календаря: {e}")
+    
+    elif text == "🔄 Обновить месяц":
+        generate_schedule()
+        set_last_generation_date(datetime.now().strftime("%Y-%m"))
+        await update.message.reply_text("✅ Расписание обновлено!")
+    
+    elif text == "❌ Не могу выйти":
+        await update.message.reply_text(
+            "🔄 **Запрос на обмен сменой**\n\n"
+            "Напиши дату и время смены в формате:\n"
+            "`ДД.ММ ЧЧ:ММ`\n\n"
+            "Пример: `15.03 17:00`"
+        )
+        context.user_data['waiting_for_swap'] = True
+
+async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    data = query.data
+    
+    if data.startswith("approve_"):
+        request_id = int(data.split("_")[1])
+        approve_swap_request(request_id)
+        await query.edit_message_text("✅ Смена обменена!")
+    
+    elif data.startswith("reject_"):
+        request_id = int(data.split("_")[1])
+        reject_swap_request(request_id)
+        await query.edit_message_text("❌ Запрос отклонён.")
+    
+    elif data == "cancel":
+        await query.edit_message_text("❌ Отменено.")
+
+# --- 🚀 ЗАПУСК ---
+if __name__ == '__main__':
+    logging.info("🔧 Инициализация базы данных...")
+    init_db()
+    
+    logging.info("📅 Проверка расписания...")
+    if not get_last_generation_date():
+        generate_schedule()
+        set_last_generation_date(datetime.now().strftime("%Y-%m"))
+    
+    logging.info("⏰ Запуск планировщика...")
+    scheduler = BackgroundScheduler()
+    scheduler.add_job(auto_generate_schedule, "interval", hours=AUTO_UPDATE_INTERVAL)
+    scheduler.start()
+    
+    logging.info("🤖 Запуск бота...")
+    application = ApplicationBuilder().token(BOT_TOKEN).build()
+    
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    application.add_handler(CallbackQueryHandler(button_callback))
+    
+    logging.info("🌐 Запуск веб-сервера (anti-sleep)...")
+    keep_alive()
+    
+    logging.info("🚀 Бот запущен и готов к работе!")
+    application.run_polling()
+
